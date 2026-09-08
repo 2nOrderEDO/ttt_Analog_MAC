@@ -9,3 +9,14 @@ test/sim_build
 test/__pycache__/
 test/results.xml
 test/gate_level_netlist.v
+
+# ---- src/analog_mac (xschem / ngspice) ----
+*.raw
+*.spice
+start_page.save
+
+# ---- src/tres-en-raya (Python / uv) ----
+__pycache__/
+*.py[cod]
+.venv/
+.oracle_cache.json

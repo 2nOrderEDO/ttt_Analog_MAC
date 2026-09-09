@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 """
-Generate a Tiny Tapeout 1x1 custom-GDS *placeholder* macro.
+Generate a Tiny Tapeout 1x1 custom-GDS *placeholder* macro (ihp-sg13g2, ttihp26b).
 
-This produces a minimal, pin-compliant macro for slot reservation:
-  * die boundary for the 1x1 tile (202.08 x 154.98 um)
+This produces a minimal, pin-compliant macro for slot reservation. It satisfies
+the Tiny Tapeout precheck rules for the ihp-sg13g2 / tt_block_1x1_pgvdd template:
+
+  * prBoundary.boundary (189/4) rectangle covering the full die
   * Metal4 signal stubs at the exact template pin coordinates
-  * Metal5 full-height power stripes (VGND / VPWR)
-  * Metal4/Metal5 text labels so the pins are electrically identified
+      - drawing  (50/0)
+      - pin      (50/2)   <- required by pin_check
+      - label    (50/25)
+  * TopMetal1 full-height power stripes (VGND / VPWR)
+      - drawing  (126/0)
+      - pin      (126/2)  <- required by pin_check / power_pin_check
+      - label    (126/25)
+      (width >= 2.1 um, within 10 um of top and bottom edges)
 
-It is intentionally minimal -- the real EMMAC + DAC + SPI layout will replace
-it in later revisions (same footprint / pinout).
+The real EMMAC + DAC + SPI macro will replace this in later revisions with the
+same footprint / pinout.
 
 Run with KLayout's bundled python:
     klayout -b -z -nc -rx -r scripts/gen_placeholder.py
 
-Outputs (written relative to the repo root):
+Outputs (relative to repo root):
     gds/<TOP>.gds
     lef/<TOP>.lef
 """
@@ -24,17 +32,20 @@ import pya  # KLayout python API
 TOP = "tt_um_ttt_emamac_2nOrderEDO"
 
 # ---------------------------------------------------------------------------
-# Geometry constants (all in database units, 1 dbu = 1 nm = 0.001 um)
+# Geometry constants (dbu = 1 nm = 0.001 um)
 # ---------------------------------------------------------------------------
 DBU_PER_UM = 1000
 DIE_W = 202080   # 202.08 um
 DIE_H = 154980   # 154.98 um
 
-# GDS layer/datatype for IHP sg13g2 (from libs.tech/klayout/tech/sg13g2.map)
-L_METAL4_DRAW = (50, 0)
-L_METAL4_TEXT = (50, 25)
-L_METAL5_DRAW = (67, 0)
-L_METAL5_TEXT = (67, 25)
+# GDS layer/datatype for IHP sg13g2 (libs.tech/klayout/tech/sg13g2.map / .lyp)
+L_M4_DRAW = (50, 0)
+L_M4_PIN = (50, 2)
+L_M4_TEXT = (50, 25)
+L_TM1_DRAW = (126, 0)
+L_TM1_PIN = (126, 2)
+L_TM1_TEXT = (126, 25)
+L_PRBOUND = (189, 4)
 
 # Signal pin geometry from tt_block_1x1_pgvdd.def:
 #   LAYER Metal4 (-150 -500)(150 500) PLACED (x 154480) N
@@ -96,10 +107,12 @@ SIGNAL_PINS = [
     ("uo_out[7]",   91200, "OUTPUT"),
 ]
 
-# Power stripes: full-height Metal5 vertical stripes near the left edge,
-# matching the shipped tt_um_colorful_stripes LEF geometry.
+# Power stripes (TopMetal1), full height minus 2 um (0..152980) so they stay
+# within 10 um of both the top and bottom edges as the precheck requires.
+# Width 2200 nm >= 2.1 um minimum. X positions follow the shipped template.
+PWR_TOP = 152980
 POWER_STRIPES = [
-    # (name, x_min, x_max, use)  -- full height 0..DIE_H, width 2200 nm (>1.2 um rule)
+    # (name, x_min, x_max, use)
     ("VGND", 16000, 18200, "GROUND"),
     ("VPWR", 20000, 22200, "POWER"),
 ]
@@ -110,30 +123,38 @@ def build():
     ly.dbu = 0.001  # 1 nm
     cell = ly.create_cell(TOP)
 
-    m4 = ly.layer(*L_METAL4_DRAW)
-    m4t = ly.layer(*L_METAL4_TEXT)
-    m5 = ly.layer(*L_METAL5_DRAW)
-    m5t = ly.layer(*L_METAL5_TEXT)
+    prb = ly.layer(*L_PRBOUND)
+    m4 = ly.layer(*L_M4_DRAW)
+    m4p = ly.layer(*L_M4_PIN)
+    m4t = ly.layer(*L_M4_TEXT)
+    tm1 = ly.layer(*L_TM1_DRAW)
+    tm1p = ly.layer(*L_TM1_PIN)
+    tm1t = ly.layer(*L_TM1_TEXT)
+
+    # -- die boundary ------------------------------------------------------
+    cell.shapes(prb).insert(pya.Box(0, 0, DIE_W, DIE_H))
 
     # -- signal pins -------------------------------------------------------
     for name, x, _dir in SIGNAL_PINS:
-        cell.shapes(m4).insert(sig_rect(x))
-        # pin label near the stub so netlisting can identify the terminal
+        r = sig_rect(x)
+        cell.shapes(m4).insert(r)          # drawing
+        cell.shapes(m4p).insert(r)         # pin (precheck containment)
         cell.shapes(m4t).insert(pya.Text(name, x, SIG_CY))
 
     # -- power stripes -----------------------------------------------------
     for name, x0, x1, _use in POWER_STRIPES:
-        cell.shapes(m5).insert(pya.Box(x0, 0, x1, DIE_H))
-        # label the rail mid-height
-        cell.shapes(m5t).insert(pya.Text(name, (x0 + x1) // 2, DIE_H // 2))
+        r = pya.Box(x0, 0, x1, PWR_TOP)
+        cell.shapes(tm1).insert(r)
+        cell.shapes(tm1p).insert(r)
+        cell.shapes(tm1t).insert(pya.Text(name, (x0 + x1) // 2, PWR_TOP // 2))
 
     ly.write(f"gds/{TOP}.gds")
     print(f"wrote gds/{TOP}.gds  (cell={TOP}, {len(SIGNAL_PINS)} signal pins, "
-          f"{len(POWER_STRIPES)} power stripes)")
+          f"{len(POWER_STRIPES)} power stripes, boundary)")
 
 
 def lef():
-    """Emit a -pinonly style LEF for the macro."""
+    """Emit a -pinonly style LEF for the macro (26b rules)."""
     lines = []
     a = lines.append
     a("VERSION 5.7 ;")
@@ -146,19 +167,19 @@ def lef():
     a("  ORIGIN 0.000 0.000 ;")
     a(f"  SIZE {DIE_W/DBU_PER_UM:.3f} BY {DIE_H/DBU_PER_UM:.3f} ;")
 
-    # power / ground
+    # power / ground on TopMetal1
     for name, x0, x1, use in POWER_STRIPES:
         a(f"  PIN {name}")
         a("    DIRECTION INOUT ;")
         a(f"    USE {use} ;")
         a("    PORT")
-        a("      LAYER Metal5 ;")
+        a("      LAYER TopMetal1 ;")
         a(f"        RECT {x0/DBU_PER_UM:.3f} 0.000 "
-          f"{x1/DBU_PER_UM:.3f} {DIE_H/DBU_PER_UM:.3f} ;")
+          f"{x1/DBU_PER_UM:.3f} {PWR_TOP/DBU_PER_UM:.3f} ;")
         a("    END")
         a(f"  END {name}")
 
-    # signals
+    # signals on Metal4, rect exactly matching the DEF template
     for name, x, direction in SIGNAL_PINS:
         a(f"  PIN {name}")
         a(f"    DIRECTION {direction} ;")

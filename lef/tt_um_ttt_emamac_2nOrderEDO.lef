@@ -11,16 +11,16 @@ MACRO tt_um_ttt_emamac_2nOrderEDO
     DIRECTION INOUT ;
     USE GROUND ;
     PORT
-      LAYER Metal5 ;
-        RECT 16.000 0.000 18.200 154.980 ;
+      LAYER TopMetal1 ;
+        RECT 16.000 0.000 18.200 152.980 ;
     END
   END VGND
   PIN VPWR
     DIRECTION INOUT ;
     USE POWER ;
     PORT
-      LAYER Metal5 ;
-        RECT 20.000 0.000 22.200 154.980 ;
+      LAYER TopMetal1 ;
+        RECT 20.000 0.000 22.200 152.980 ;
     END
   END VPWR
   PIN clk

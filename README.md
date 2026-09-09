@@ -1,4 +1,4 @@
-![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg)
+![](https://github.com/2nOrderEDO/ttt_Analog_MAC/actions/workflows/gds.yaml/badge.svg) ![](https://github.com/2nOrderEDO/ttt_Analog_MAC/actions/workflows/docs.yaml/badge.svg)
 
 # Tiny Tapeout Analog Project Template
 

@@ -41,7 +41,7 @@ N -500 200 -500 210 {lab=0}
 N -500 10 -140 10 {lab=#net2}
 N 160 -10 210 -10 {lab=#net4}
 C {vsource.sym} -160 100 0 0 {name=V1 value=1.8 savecurrent=false}
-C {isource.sym} -500 100 2 0 {name=I0 value="PULSE 8u -8u 1m 1u 1u 1"}
+C {isource.sym} -500 100 2 0 {name=I0 value=0 savecurrent=false}
 C {vsource.sym} 210 100 0 0 {name=V2 value=0.5 savecurrent=false}
 C {gnd.sym} 210 140 0 0 {name=l1 lab=0}
 C {gnd.sym} -500 210 0 0 {name=l2 lab=0}
@@ -54,19 +54,17 @@ value=".lib cornerMOSlv.lib mos_tt
 C {code_shown.sym} 300 40 0 0 {name=spice1 only_toplevel=false value="
 .control
 	option savecurrents
+	set noaskquit
+	set filetype=ascii
 	op
-	print all
-	write EMMAC_UnitTest.raw
-	reset
-	tran 10u 2m
-	write EMMAC_UnitTest_tran.raw
+	print v(net2) i(v2)
 .endc
 
 .save all
 "}
 C {launcher.sym} 60 -710 0 0 {name=h5
 descr="load waves"
-tclcommand="xschem raw_read $netlist_dir/EMMAC_UnitTest_tran.raw tran"
+tclcommand="xschem raw_read $netlist_dir/accuracy/acc_k1_i0.raw dc"
 }
 C {vsource.sym} -500 170 0 0 {name=V0 value=0 savecurrent=false}
-C {EMMAC_Block_v2.sym} 10 0 0 0 {name=x2 wmul=7}
+C {EMMAC_Block_v3.sym} 10 0 0 0 {name=x2 wmul=1}

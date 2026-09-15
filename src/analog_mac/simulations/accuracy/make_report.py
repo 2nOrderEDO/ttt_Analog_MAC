@@ -38,7 +38,7 @@ def common_window(rows, k):
     for iin in range(-8, 8):
         dd = ra.parse_ascii_raw(os.path.join(
             rows[0]["_dir"], f"k{k}", f"i{ra.iin_tag(iin)}", "acc.raw"))
-        iout = dd["i(v2)"]
+        iout = ra.get_vec(dd, f"i({ra.VSRC})")
         ideal = -(-1.0) * k * iin * 1e-6
         lsb = k * 1e-6
         for j, x in enumerate(iout):
@@ -57,7 +57,7 @@ def pass_vs_vout(rundir):
             d = ra.parse_ascii_raw(os.path.join(
                 rundir, f"k{k}", f"i{ra.iin_tag(iin)}", "acc.raw"))
             vout = d["v(v-sweep)"]
-            iout = d["i(v2)"]
+            iout = ra.get_vec(d, f"i({ra.VSRC})")
             ideal = k * iin * 1e-6
             lsb = k * 1e-6
             ok[(k, iin)] = [abs(x - ideal) < 0.5 * lsb for x in iout]
@@ -68,13 +68,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--prefix", default="",
                     help="suffix used by run_accuracy.py, e.g. '_v3'")
+    ap.add_argument("--results-dir", default=None,
+                    help="base dir with nominal/corner_*/mc outputs")
+    ap.add_argument("--name", default=None,
+                    help="label for the report title (default: from --prefix)")
+    ap.add_argument("--vsrc", default="v2",
+                    help="testbench output voltage source name (default v2)")
     args = ap.parse_args()
+    ra.VSRC = args.vsrc
     prefix = args.prefix
-    rundir = os.path.join(HERE, f"nominal{prefix}")
+    resdir = args.results_dir or HERE
+    rundir = os.path.join(resdir, f"nominal{prefix}")
     rows = load_rows(rundir)
     for r in rows:
         r["_dir"] = rundir
-    version = prefix.strip("_") or "v2"
+    version = args.name or prefix.strip("_") or "v2"
     lines = []
     lines.append(f"# EMMAC_Block_{version} accuracy characterization\n")
     lines.append(f"Testbench: `EMMAC_Accuracy{prefix}.sch` / "
@@ -121,7 +129,7 @@ def main():
             d = ra.parse_ascii_raw(os.path.join(
                 rundir, f"k{k}", f"i{ra.iin_tag(iin)}", "acc.raw"))
             vo = d["v(v-sweep)"]
-            io = d["i(v2)"]
+            io = ra.get_vec(d, f"i({ra.VSRC})")
             j = min(range(len(vo)), key=lambda q: abs(vo[q] - 0.4))
             levels.append(io[j])
         mono = all(b > a for a, b in zip(levels, levels[1:]))
@@ -135,7 +143,7 @@ def main():
     lines.append("| corner | combos failing | combos >1 LSB | worst LSB |")
     lines.append("|---|---|---|---|")
     for tag in ["tt", "ss", "ff", "sf", "fs"]:
-        cdir = os.path.join(HERE, f"corner{prefix}_{tag}")
+        cdir = os.path.join(resdir, f"corner{prefix}_{tag}")
         if not os.path.isdir(cdir):
             continue
         crows = load_rows(cdir)
@@ -143,7 +151,7 @@ def main():
         nwarn = sum(1 for r in crows if r["max_err_lsb"] >= 1.0)
         lines.append(f"| {tag} | {nbad}/128 | {nwarn}/128 | "
                      f"{max(r['max_err_lsb'] for r in crows):.2f} |")
-    mc = os.path.join(HERE, f"mc{prefix}", "mc_results.csv")
+    mc = os.path.join(resdir, f"mc{prefix}", "mc_results.csv")
     lines.append("\n## Mismatch Monte Carlo\n")
     if os.path.exists(mc):
         vals = []
@@ -161,7 +169,7 @@ def main():
         iins = sorted({int(l.split(",")[2].replace("u", ""))
                        for l in open(mc).read().splitlines()[1:]})
         lines.append(f"- matrix: k in {ks}, Iin in {iins} uA, "
-                     f"Vout 0.4/0.9/1.4 V")
+                     f"Vout {ra.MC_VOUT.replace(' ', '/')} V")
         lines.append(f"- runs: {len(runs)}, runs with any violation: "
                      f"{bad_runs} ({100*bad_runs/len(runs):.1f}%)")
         lines.append(f"- worst violation over all runs: "
@@ -177,13 +185,13 @@ def main():
     lines.append(f"- Best common output bias: Vout = {vout[best_j]:.2f} V, "
                  f"{best_n}/128 (k,Iin) combos within half-LSB.")
     lines.append(f"- {bad}/128 combos never meet half-LSB anywhere in the "
-                 f"0.2..1.6 V sweep.")
+                 f"{vout[0]:.2f}..{vout[-1]:.2f} V sweep.")
     lines.append(f"- Worst error at Vout = 0.9 V: {worst_mid:.2f} LSB.")
     lines.append("- Measured polarity is non-inverting in this testbench "
                  "(Iout ~ +k*Iin).")
     lines.append("- Residual error is an odd (S-shaped) compression that "
                  "grows with k; mismatch is secondary.\n")
-    out = os.path.join(HERE, f"REPORT{prefix}.md")
+    out = os.path.join(resdir, f"REPORT{prefix}.md")
     open(out, "w").write("\n".join(lines) + "\n")
     print("wrote", out)
     print("\n".join(lines[:8]))

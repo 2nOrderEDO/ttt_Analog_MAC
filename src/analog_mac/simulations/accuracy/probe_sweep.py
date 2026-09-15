@@ -23,6 +23,22 @@ def detect_top(base_text):
     raise SystemExit("top-level EMMAC_Block instance not found")
 
 
+def detect_mult_devices(base_text):
+    found = []
+    top = None
+    for line in base_text.splitlines():
+        if "m={wmul}" in line:
+            toks = line.split()
+            found.append((toks[0].lower(), toks[5]))
+        m = re.match(r"^(x\w+)\s+.*\bEMMAC_Block\w*\b", line)
+        if m:
+            top = m.group(1)
+    if not found or top is None:
+        raise SystemExit("could not auto-detect the wmul device(s); "
+                         "use --mult-device")
+    return [f"@n.{top}.{dev}.n{model}" for dev, model in found]
+
+
 def parse_devices(base_text):
     devs = {}
     inside = False
@@ -44,23 +60,34 @@ def main():
     ap.add_argument("--netlist", default="EMMAC_Accuracy_v3.spice")
     ap.add_argument("--prefix", default="_v3")
     ap.add_argument("--vout", default="0.6")
+    ap.add_argument("--outdir", default=None,
+                    help="base dir for probe<prefix>/ and probe<prefix>.csv")
+    ap.add_argument("--mult-device", default=None)
+    ap.add_argument("--isrc", default="i0")
+    ap.add_argument("--vsrc", default="v2")
     args = ap.parse_args()
 
     base_path = os.path.join(SIMDIR, args.netlist)
     base = open(base_path).read()
     top = detect_top(base)
     devs = parse_devices(base)
+    mdevs = ([d.strip() for d in args.mult_device.split(",")]
+             if args.mult_device else detect_mult_devices(base))
     print(f"{len(devs)} devices: {sorted(devs, key=int)}")
+    print(f"wmul devices: {mdevs}")
 
-    rundir = os.path.join(HERE, f"probe{args.prefix}")
+    outdir = args.outdir or HERE
+    rundir = os.path.join(outdir, f"probe{args.prefix}")
     os.makedirs(rundir, exist_ok=True)
 
     lines = [".control", "set noaskquit"]
     for k in range(1, 9):
-        lines.append(f"alter @n.{top}.xm27.nsg13_lv_nmos[mult] = {k}")
+        for d in mdevs:
+            lines.append(f"alter {d}[mult] = {k}")
         for iin in range(-8, 8):
-            lines.append(f"alter i0 = {'0' if iin == 0 else f'{iin}u'}")
-            lines.append(f"alter v2 = {args.vout}")
+            lines.append(f"alter {args.isrc} = "
+                         f"{'0' if iin == 0 else f'{iin}u'}")
+            lines.append(f"alter {args.vsrc} = {args.vout}")
             lines.append("op")
             lines.append(f'echo "PT {k} {iin}"')
             for num, model in devs.items():
@@ -92,7 +119,7 @@ def main():
         if m and cur is not None:
             dev, num, model, param = m.group(1), m.group(2), m.group(3), m.group(4)
             data[cur].setdefault(num, {})[param] = float(m.group(5))
-    out = os.path.join(HERE, f"probe{args.prefix}.csv")
+    out = os.path.join(outdir, f"probe{args.prefix}.csv")
     with open(out, "w") as fh:
         fh.write("k,iin,dev,ids,gds,vds,gm\n")
         for (k, iin), d in sorted(data.items()):

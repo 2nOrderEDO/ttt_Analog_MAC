@@ -12,7 +12,6 @@ import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SIMDIR = os.path.dirname(HERE)
-BASE = os.path.join(SIMDIR, "EMMAC_Accuracy_v3.spice")
 
 W_P = "w=1u l=0.28u ng=1"       # M35/M36 (quiet branch)
 W_PC = "w=4u l=0.28u ng=1"      # output/ref cascodes (hi current)
@@ -69,9 +68,16 @@ BIAS = {
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--variants", default="c1,c2,c3,c4,all")
-    ap.add_argument("--outdir", default=None)
+    ap.add_argument("--netlist", default="EMMAC_Accuracy_v3.spice",
+                    help="base netlist relative to the parent of scripts/")
+    ap.add_argument("--outdir", default=None,
+                    help="output dir for variant netlists (default: parent)")
     args = ap.parse_args()
-    base = open(BASE).read()
+    base_path = os.path.join(SIMDIR, args.netlist)
+    stem = os.path.splitext(os.path.basename(base_path))[0]
+    outdir = args.outdir or os.path.dirname(base_path)
+    os.makedirs(outdir, exist_ok=True)
+    base = open(base_path).read()
     for tag in args.variants.split(","):
         tags = ["c1", "c2", "c3", "c4"] if tag == "all" else [tag]
         text = base
@@ -89,7 +95,7 @@ def main():
                     bias_lines.append(BIAS[b])
         head, sep, tail = text.rpartition(".ends")
         text = head + "\n".join(bias_lines) + "\n" + sep + tail
-        out = os.path.join(SIMDIR, f"EMMAC_Accuracy_v3_{tag}.spice")
+        out = os.path.join(outdir, f"{stem}_{tag}.spice")
         open(out, "w").write(text)
         print("wrote", out)
 

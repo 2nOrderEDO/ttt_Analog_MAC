@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-"""Accuracy characterization driver for the EMMAC_Block_v2 cell.
+"""Accuracy characterization driver for the EMMAC cell.
 
 Modes:
-  nominal : full grid (k=1..8 x Iin=-8..7uA x Vout=0.2..1.6V) at mos_tt
+  nominal : full grid (k=1..8 x Iin=-8..7uA x Vout sweep) at mos_tt
   corner  : same grid for several .lib sections / temperatures
-  mc      : mismatch Monte-Carlo, reduced Vout grid, max half-LSB violation per point
+  mc      : mismatch Monte-Carlo, max half-LSB violation per point
 
-Ideal inverting transfer: Iout(measured at V2) = -k*Iin, error = i(v2) + k*Iin.
+Ideal transfer: Iout(measured at V2) = -sign*k*Iin, error = i(v2)+sign*k*Iin.
+
+Parallelism:
+  --jobs N  grid modes run one ngspice per (corner, k) task; MC runs one
+  ngspice per chunk. Each worker gets OMP_NUM_THREADS=1.
+
+Server layout:
+  --netlist is resolved against the parent directory of this script
+  (e.g. --netlist circuits/EMMAC_Accuracy_v3.spice when scripts/ and
+  circuits/ are siblings). Outputs go under --results-dir.
 """
 
 import argparse
@@ -15,38 +24,49 @@ import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SIMDIR = os.path.dirname(HERE)
-BASE = os.path.join(SIMDIR, "EMMAC_Accuracy.spice")
-MULT_DEV = "@n.x2.xm27.nsg13_lv_nmos"
 
 K_VALUES = list(range(1, 9))
 IIN_VALUES_UA = list(range(-8, 8))
-VOUT_START, VOUT_STOP, VOUT_STEP = 0.2, 1.6, 0.1
+VOUT_START, VOUT_STOP, VOUT_STEP = 0.1, 1.3, 0.1
+MC_VOUT = "0.2 1.1 0.45"
 
 CONTROL_RE = re.compile(r"\.control.*?\.endc", re.S)
+MEAS_RE = re.compile(r"^\S+\s+=\s+(\S+)(?:\s+at=\s+(\S+))?")
+MC_RE = re.compile(r"^MC\s+(\d+)\s+(\d+)\s+(\S+)")
+
+WORKER_THREADS = 1  # OMP threads per ngspice worker (set from --worker-threads)
+ISRC = "i0"         # testbench input current source name (--isrc)
+VSRC = "v2"         # testbench output voltage source name (--vsrc)
 
 
-def detect_mult_device(base_text):
-    """Return the ngspice @path of the device driven by wmul."""
-    dev = model = top = None
+def detect_mult_devices(base_text):
+    """Return ngspice @paths of all devices driven by wmul."""
+    found = []
+    top = None
     for line in base_text.splitlines():
         if "m={wmul}" in line:
             toks = line.split()
-            dev, model = toks[0].lower(), toks[5]
+            found.append((toks[0].lower(), toks[5]))
         m = re.match(r"^(x\w+)\s+.*\bEMMAC_Block\w*\b", line)
         if m:
             top = m.group(1)
-    if dev is None or top is None:
-        raise SystemExit("could not auto-detect the wmul device; "
+    if not found or top is None:
+        raise SystemExit("could not auto-detect the wmul device(s); "
                          "use --mult-device")
-    return f"@n.{top}.{dev}.n{model}"
-
+    return [f"@n.{top}.{dev}.n{model}" for dev, model in found]
 
 
 def iin_tag(iin):
     return "0" if iin == 0 else f"{iin}u"
+
+
+def iins_arg(values=None):
+    values = IIN_VALUES_UA if values is None else values
+    return " ".join("0" if v == 0 else f"{v}u" for v in values)
 
 
 def make_deck(base_text, lv, hv, control, temp=None):
@@ -54,6 +74,9 @@ def make_deck(base_text, lv, hv, control, temp=None):
                              f".lib cornerMOSlv.lib {lv}")
     text = text.replace(".lib cornerMOShv.lib mos_tt",
                         f".lib cornerMOShv.lib {hv}")
+    dio = lv.replace("mos_", "dio_")
+    text = text.replace(".lib cornerDIO.lib dio_tt",
+                        f".lib cornerDIO.lib {dio}")
     text = CONTROL_RE.sub(control, text, count=1)
     if temp is not None:
         head, sep, tail = text.rpartition(".end")
@@ -61,18 +84,19 @@ def make_deck(base_text, lv, hv, control, temp=None):
     return text
 
 
-def nominal_control(outdir):
-    iins = " ".join("0" if v == 0 else f"{v}u" for v in IIN_VALUES_UA)
+def nominal_control(outdir, devs, isrc, vsrc):
     ks = " ".join(str(k) for k in K_VALUES)
+    alts = "\n".join(f"  alter {d}[mult] = $k" for d in devs)
     return f""".control
 set noaskquit
 set filetype=ascii
 option savecurrents
+save all
 foreach k {ks}
-  alter {MULT_DEV}[mult] = $k
-  foreach iin {iins}
-    alter i0 = $iin
-    dc V2 {VOUT_START} {VOUT_STOP} {VOUT_STEP}
+{alts}
+  foreach iin {iins_arg()}
+    alter {isrc} = $iin
+    dc {vsrc} {VOUT_START} {VOUT_STOP} {VOUT_STEP}
     write {outdir}/k$k/i$iin/acc.raw
   end
 end
@@ -80,19 +104,36 @@ end
 """
 
 
-def mc_control(runs, sign, ks=K_VALUES, iins=IIN_VALUES_UA):
-    iins_s = " ".join("0" if v == 0 else f"{v}u" for v in iins)
+def nominal_control_k(outdir, devs, k, isrc, vsrc):
+    alts = "\n".join(f"alter {d}[mult] = {k}" for d in devs)
+    return f""".control
+set noaskquit
+set filetype=ascii
+option savecurrents
+save all
+{alts}
+foreach iin {iins_arg()}
+  alter {isrc} = $iin
+  dc {vsrc} {VOUT_START} {VOUT_STOP} {VOUT_STEP}
+  write {outdir}/k{k}/i$iin/acc.raw
+end
+.endc
+"""
+
+
+def mc_control(runs, sign, devs, ks, iins, isrc, vsrc):
     ks_s = " ".join(str(k) for k in ks)
+    alts = "\n".join(f"    alter {d}[mult] = $k" for d in devs)
     return f""".control
 set noaskquit
 foreach run {runs}
   reset
   foreach k {ks_s}
-    alter {MULT_DEV}[mult] = $k
-    foreach iin {iins_s}
-      alter i0 = $iin
-      dc V2 0.4 1.4 0.5
-      let aerr = abs(v2#branch + {sign}*$k*$iin)
+{alts}
+    foreach iin {iins_arg(iins)}
+      alter {isrc} = $iin
+      dc {vsrc} {MC_VOUT}
+      let aerr = abs({vsrc}#branch + {sign}*$k*$iin)
       let viol = aerr - 0.5*$k*1e-6
       meas dc vmax MAX viol
       echo "MC $run $k $iin"
@@ -103,11 +144,81 @@ end
 """
 
 
-def prepare_grid(outdir):
-    for k in K_VALUES:
+def prepare_grid(outdir, ks=None):
+    for k in (K_VALUES if ks is None else ks):
         for iin in IIN_VALUES_UA:
             os.makedirs(os.path.join(outdir, f"k{k}", f"i{iin_tag(iin)}"),
                         exist_ok=True)
+
+
+def resolve_out(args, default_name):
+    if args.outdir:
+        return (args.outdir if os.path.isabs(args.outdir)
+                else os.path.join(HERE, args.outdir))
+    return os.path.join(args.results_dir or HERE, default_name)
+
+
+def run_ngspice(deck_text, cwd, worker_threads=1):
+    """Write deck.spice in cwd and run ngspice single-threaded."""
+    os.makedirs(cwd, exist_ok=True)
+    deck_path = os.path.join(cwd, "deck.spice")
+    with open(deck_path, "w") as fh:
+        fh.write(deck_text)
+    env = os.environ.copy()
+    env["OMP_NUM_THREADS"] = str(worker_threads)
+    log = os.path.join(cwd, "ngspice.log")
+    with open(log, "w") as fh:
+        subprocess.run(["ngspice", "-b", deck_path], cwd=cwd, env=env,
+                       stdout=fh, stderr=subprocess.STDOUT, check=False)
+    return log
+
+
+def grid_task(task):
+    """Run one (base_text, lv, hv, temp, outdir, dev, k) grid task."""
+    control = nominal_control_k(task["outdir"], task["devs"], task["k"],
+                                task["isrc"], task["vsrc"])
+    deck = make_deck(task["base_text"], task["lv"], task["hv"], control,
+                     task["temp"])
+    return run_ngspice(deck, os.path.join(task["outdir"],
+                                          f"_task_k{task['k']}"),
+                       task["worker_threads"])
+
+
+def corner_task(task):
+    """Run one whole corner (all k) in a single ngspice process."""
+    control = nominal_control(task["outdir"], task["devs"],
+                              task["isrc"], task["vsrc"])
+    deck = make_deck(task["base_text"], task["lv"], task["hv"], control,
+                     task["temp"])
+    return run_ngspice(deck, os.path.join(task["outdir"], "_task_corner"),
+                       task["worker_threads"])
+
+
+def mc_chunk_task(task):
+    """Run one MC chunk and return {(run,k,iin): violation}."""
+    runs = " ".join(str(i) for i in range(1, task["hi"] - task["lo"] + 2))
+    control = mc_control(runs, task["sign"], task["devs"], task["ks"],
+                         task["iins"], task["isrc"], task["vsrc"])
+    deck = make_deck(task["base_text"], "mos_tt_mismatch",
+                     "mos_tt_mismatch", control, task["temp"])
+    log = run_ngspice(deck, task["cdir"], task["worker_threads"])
+    return parse_mc_log(log, task["lo"])
+
+
+def parse_mc_log(log, run_offset):
+    results = {}
+    cur = None
+    for line in open(log):
+        m = MC_RE.match(line)
+        if m:
+            cur = (int(m.group(1)) + run_offset - 1, int(m.group(2)),
+                   m.group(3))
+            continue
+        m = MEAS_RE.match(line)
+        if m and cur:
+            results[cur] = float(m.group(1))
+            cur = None
+    return results
 
 
 def parse_ascii_raw(path):
@@ -161,6 +272,17 @@ def longest_true_run(vals):
     return best
 
 
+def get_vec(data, name):
+    """Case-insensitive lookup of a raw vector name."""
+    if name in data:
+        return data[name]
+    low = name.lower()
+    for key, val in data.items():
+        if key.lower() == low:
+            return val
+    raise KeyError(f"{name} not in raw (have {list(data)[:5]}...)")
+
+
 def analyze_nominal(rundir, sign):
     rows = []
     for k in K_VALUES:
@@ -168,7 +290,7 @@ def analyze_nominal(rundir, sign):
             path = os.path.join(rundir, f"k{k}", f"i{iin_tag(iin)}", "acc.raw")
             d = parse_ascii_raw(path)
             vout = d["v(v-sweep)"]
-            iout = d["i(v2)"]
+            iout = get_vec(d, f"i({VSRC})")
             vin = d["v(net2)"]
             ideal = -sign * k * iin * 1e-6
             err = [x - ideal for x in iout]
@@ -185,6 +307,14 @@ def analyze_nominal(rundir, sign):
                              win_hi=(vout[hi] if hi is not None else None),
                              vin_mid=vin[mid]))
     return rows
+
+
+def write_csv(rows, path):
+    with open(path, "w") as fh:
+        keys = list(rows[0].keys())
+        fh.write(",".join(keys) + "\n")
+        for r in rows:
+            fh.write(",".join(str(r[k]) for k in keys) + "\n")
 
 
 def print_nominal_summary(rows, sign):
@@ -215,27 +345,32 @@ def print_nominal_summary(rows, sign):
               "(k,Iin).")
 
 
+def run_tasks(tasks, worker, jobs):
+    if jobs and jobs > 1:
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            for res in ex.map(worker, tasks):
+                yield res
+    else:
+        for t in tasks:
+            yield worker(t)
+
+
 def run_nominal(args):
-    rundir = os.path.join(HERE, args.outdir or f"nominal{args.prefix}")
+    rundir = resolve_out(args, f"nominal{args.prefix}")
     if not args.analyze_only:
         shutil.rmtree(rundir, ignore_errors=True)
         os.makedirs(rundir)
         prepare_grid(rundir)
-        deck = make_deck(open(BASE).read(), args.lv, args.hv,
-                         nominal_control(rundir), args.temp)
-        deck_path = os.path.join(rundir, "deck.spice")
-        open(deck_path, "w").write(deck)
-        log = os.path.join(rundir, "ngspice.log")
-        with open(log, "w") as fh:
-            subprocess.run(["ngspice", "-b", deck_path], cwd=rundir,
-                           stdout=fh, stderr=subprocess.STDOUT, check=False)
+        base_text = open(args.base).read()
+        tasks = [dict(base_text=base_text, lv=args.lv, hv=args.hv,
+                      temp=args.temp, outdir=rundir, devs=args.mult_devs,
+                      isrc=args.isrc, vsrc=args.vsrc,
+                      worker_threads=args.worker_threads, k=k)
+                 for k in K_VALUES]
+        for _ in run_tasks(tasks, grid_task, args.jobs):
+            pass
     rows = analyze_nominal(rundir, args.sign)
-    csv = os.path.join(rundir, "summary.csv")
-    with open(csv, "w") as fh:
-        keys = list(rows[0].keys())
-        fh.write(",".join(keys) + "\n")
-        for r in rows:
-            fh.write(",".join(str(r[k]) for k in keys) + "\n")
+    write_csv(rows, os.path.join(rundir, "summary.csv"))
     print_nominal_summary(rows, args.sign)
     print(f"\nresults: {rundir}")
 
@@ -243,27 +378,38 @@ def run_nominal(args):
 def run_corners(args):
     sections = ["mos_tt", "mos_ss", "mos_ff", "mos_sf", "mos_fs"]
     temps = args.temps.split(",") if args.temps else [None]
+    resdir = args.results_dir or HERE
+    base_text = open(args.base).read()
+    tasks = []
     for sec in sections:
         for temp in temps:
             tag = sec.replace("mos_", "") + (f"_t{temp}" if temp else "")
-            outdir = os.path.join(HERE, f"corner{args.prefix}_{tag}")
+            outdir = os.path.join(resdir, f"corner{args.prefix}_{tag}")
             shutil.rmtree(outdir, ignore_errors=True)
             os.makedirs(outdir)
             prepare_grid(outdir)
-            deck = make_deck(open(BASE).read(), sec, sec,
-                             nominal_control(outdir), temp)
-            deck_path = os.path.join(outdir, "deck.spice")
-            open(deck_path, "w").write(deck)
-            log = os.path.join(outdir, "ngspice.log")
-            with open(log, "w") as fh:
-                subprocess.run(["ngspice", "-b", deck_path], cwd=outdir,
-                               stdout=fh, stderr=subprocess.STDOUT, check=False)
+            if args.granularity == "corner":
+                tasks.append(dict(base_text=base_text, lv=sec, hv=sec,
+                                  temp=temp, outdir=outdir,
+                                  devs=args.mult_devs, tag=tag,
+                                  isrc=args.isrc, vsrc=args.vsrc,
+                                  worker_threads=args.worker_threads))
+            else:
+                for k in K_VALUES:
+                    tasks.append(dict(base_text=base_text, lv=sec, hv=sec,
+                                      temp=temp, outdir=outdir,
+                                      devs=args.mult_devs, k=k, tag=tag,
+                                      isrc=args.isrc, vsrc=args.vsrc,
+                                      worker_threads=args.worker_threads))
+    worker = grid_task if args.granularity == "k" else corner_task
+    for _ in run_tasks(tasks, worker, args.jobs):
+        pass
+    for sec in sections:
+        for temp in temps:
+            tag = sec.replace("mos_", "") + (f"_t{temp}" if temp else "")
+            outdir = os.path.join(resdir, f"corner{args.prefix}_{tag}")
             rows = analyze_nominal(outdir, args.sign)
-            with open(os.path.join(outdir, "summary.csv"), "w") as fh:
-                keys = list(rows[0].keys())
-                fh.write(",".join(keys) + "\n")
-                for r in rows:
-                    fh.write(",".join(str(r[k]) for k in keys) + "\n")
+            write_csv(rows, os.path.join(outdir, "summary.csv"))
             bad = [r for r in rows if r["win_lo"] is None]
             warn = sum(1 for r in rows if r["max_err_lsb"] >= 1.0)
             print(f"{tag:>10}: combos never meeting criterion: {len(bad):>3}, "
@@ -272,7 +418,7 @@ def run_corners(args):
 
 
 def run_mc(args):
-    rundir = os.path.join(HERE, args.outdir or f"mc{args.prefix}")
+    rundir = resolve_out(args, f"mc{args.prefix}")
     os.makedirs(rundir, exist_ok=True)
     chunk = args.chunk_size or args.runs
     if args.mc_set == "reduced":
@@ -281,38 +427,21 @@ def run_mc(args):
     else:
         ks = K_VALUES
         iins = IIN_VALUES_UA
-    results = {}
-    meas_re = re.compile(r"^\S+\s+=\s+(\S+)(?:\s+at=\s+(\S+))?")
-    mc_re = re.compile(r"^MC\s+(\d+)\s+(\d+)\s+(\S+)")
+    base_text = open(args.base).read()
     nchunks = (args.runs + chunk - 1) // chunk
+    tasks = []
     for c in range(nchunks):
         lo = c * chunk + 1
         hi = min(args.runs, lo + chunk - 1)
-        cdir = os.path.join(rundir, f"chunk_{c:02d}")
-        os.makedirs(cdir, exist_ok=True)
-        runs = " ".join(str(i) for i in range(1, hi - lo + 2))
-        deck = make_deck(open(BASE).read(), "mos_tt_mismatch",
-                         "mos_tt_mismatch",
-                         mc_control(runs, args.sign, ks, iins), args.temp)
-        deck_path = os.path.join(cdir, "deck.spice")
-        open(deck_path, "w").write(deck)
-        log = os.path.join(cdir, "ngspice.log")
-        with open(log, "w") as fh:
-            subprocess.run(["ngspice", "-b", deck_path], cwd=cdir,
-                           stdout=fh, stderr=subprocess.STDOUT, check=False)
-        cur = None
-        for line in open(log):
-            m = mc_re.match(line)
-            if m:
-                cur = (int(m.group(1)) + lo - 1, int(m.group(2)),
-                       m.group(3))
-                continue
-            m = meas_re.match(line)
-            if m and cur:
-                results[cur] = float(m.group(1))
-                cur = None
-        print(f"chunk {c + 1}/{nchunks} done "
-              f"(runs {lo}..{hi}), {len(results)} points total",
+        tasks.append(dict(base_text=base_text, cdir=os.path.join(
+            rundir, f"chunk_{c:02d}"), lo=lo, hi=hi, sign=args.sign,
+            devs=args.mult_devs, ks=ks, iins=iins, temp=args.temp, c=c,
+            isrc=args.isrc, vsrc=args.vsrc,
+            worker_threads=args.worker_threads))
+    results = {}
+    for c, chunk_res in enumerate(run_tasks(tasks, mc_chunk_task, args.jobs)):
+        results.update(chunk_res)
+        print(f"chunk {c + 1}/{nchunks} done, {len(results)} points total",
               flush=True)
     if not results:
         print("no MC results parsed; check", rundir)
@@ -326,8 +455,7 @@ def run_mc(args):
     print(f"MC runs: {len(runs_done)}  sign={args.sign}")
     print(f"runs with any half-LSB violation: {len(viol)} "
           f"({100 - yield_pct:.2f}%)")
-    print(f"worst violation: {worst*1e6:+.3f} uA "
-          f"(positive = out of spec)")
+    print(f"worst violation: {worst*1e6:+.3f} uA (positive = out of spec)")
     k_viol = {}
     for (r, k, iin), v in results.items():
         if v > 0:
@@ -357,20 +485,45 @@ def main():
                     help="runs per ngspice invocation (MC mode)")
     ap.add_argument("--sign", type=float, default=1.0,
                     help="1.0 if ideal v2#branch = -k*Iin, -1.0 otherwise")
-    ap.add_argument("--outdir", default=None)
+    ap.add_argument("--outdir", default=None,
+                    help="explicit output dir (overrides --results-dir)")
+    ap.add_argument("--results-dir", default=None,
+                    help="base output dir (default: directory of this script)")
     ap.add_argument("--prefix", default="",
                     help="suffix for default output dirs, e.g. '_v3'")
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="parallel ngspice tasks (grid: per (corner,k), "
+                         "MC: per chunk)")
+    ap.add_argument("--worker-threads", type=int, default=1,
+                    help="OMP_NUM_THREADS per ngspice worker (default 1; "
+                         "on many-core servers keep 1 and raise --jobs)")
+    ap.add_argument("--granularity", choices=["k", "corner"], default="k",
+                    help="corner grid task size: 'k' (one ngspice per k, "
+                         "best with many cores) or 'corner' (one ngspice per "
+                         "corner, best with --worker-threads>1)")
     ap.add_argument("--netlist", default="EMMAC_Accuracy.spice",
-                    help="netlist path relative to simulations/")
+                    help="netlist path relative to the parent of scripts/")
     ap.add_argument("--mult-device", default=None,
-                    help="ngspice @path of the wmul device (auto-detected)")
+                    help="comma-separated ngspice @paths of the wmul "
+                         "device(s); auto-detected if omitted")
+    ap.add_argument("--isrc", default="i0",
+                    help="testbench input current source name (default i0)")
+    ap.add_argument("--vsrc", default="v2",
+                    help="testbench output voltage source name (default v2)")
     ap.add_argument("--analyze-only", action="store_true")
     args = ap.parse_args()
-    global BASE, MULT_DEV
-    BASE = os.path.join(SIMDIR, args.netlist)
-    base_text = open(BASE).read()
-    MULT_DEV = args.mult_device or detect_mult_device(base_text)
-    print(f"netlist: {BASE}\nwmul device: {MULT_DEV}")
+    global WORKER_THREADS, ISRC, VSRC
+    WORKER_THREADS = args.worker_threads
+    ISRC, VSRC = args.isrc, args.vsrc
+    os.environ["OMP_NUM_THREADS"] = str(WORKER_THREADS)
+    args.base = os.path.join(SIMDIR, args.netlist)
+    base_text = open(args.base).read()
+    if args.mult_device:
+        args.mult_devs = [d.strip() for d in args.mult_device.split(",")]
+    else:
+        args.mult_devs = detect_mult_devices(base_text)
+    print(f"netlist: {args.base}\nwmul devices: {args.mult_devs}"
+          f"\nsources: isrc={ISRC} vsrc={VSRC}")
     if args.mode == "nominal":
         run_nominal(args)
     elif args.mode == "corners":

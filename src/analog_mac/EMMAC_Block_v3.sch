@@ -81,12 +81,7 @@ N 780 -380 780 -370 {lab=VDD}
 N 820 -340 830 -340 {lab=#net10}
 N 770 -340 780 -340 {lab=VDD}
 N 710 90 780 90 {lab=#net5}
-N 880 -380 880 -370 {lab=VDD}
-N 880 -340 890 -340 {lab=VDD}
-N 890 -380 890 -340 {lab=VDD}
-N 880 -380 890 -380 {lab=VDD}
-N 830 -340 840 -340 {lab=#net10}
-N 780 -380 880 -380 {lab=VDD}
+N 780 -380 1060 -380 {lab=VDD}
 N 1060 70 1070 70 {lab=0}
 N 1070 70 1070 110 {lab=0}
 N 1060 110 1070 110 {lab=0}
@@ -127,11 +122,6 @@ N 1060 -100 1060 -20 {lab=#net11}
 N 610 -310 610 150 {lab=#net8}
 N 170 -100 340 -100 {lab=IN}
 N 830 -340 830 -300 {lab=#net10}
-N 870 280 880 280 {lab=0}
-N 870 280 870 320 {lab=0}
-N 870 320 880 320 {lab=0}
-N 880 310 880 320 {lab=0}
-N 880 320 880 350 {lab=0}
 N 1460 240 1460 280 {lab=0}
 N 1450 280 1460 280 {lab=0}
 N 1450 270 1450 280 {lab=0}
@@ -176,18 +166,12 @@ N 1450 -270 1450 -210 {lab=#net16}
 N 340 -380 610 -380 {lab=VDD}
 N 1060 100 1060 110 {lab=0}
 N 1060 -380 1240 -380 {lab=VDD}
-N 880 240 880 250 {lab=#net17}
-N 880 240 930 240 {lab=#net17}
-N 930 240 930 280 {lab=#net17}
-N 920 280 930 280 {lab=#net17}
-N 930 240 1210 240 {lab=#net17}
 N 1450 -300 1460 -300 {lab=VDD}
 N 1460 -340 1460 -300 {lab=VDD}
 N 1450 -340 1450 -330 {lab=VDD}
 N 1450 -340 1460 -340 {lab=VDD}
 N 1450 -380 1450 -340 {lab=VDD}
 N 1060 -380 1060 -230 {lab=VDD}
-N 890 -380 1060 -380 {lab=VDD}
 N 1060 110 1060 350 {lab=0}
 N 1010 -190 1010 -120 {lab=IN}
 N 1110 -60 1110 -50 {lab=#net14}
@@ -199,12 +183,11 @@ N 1110 -70 1110 -60 {lab=#net14}
 N 1060 -150 1240 -150 {lab=#net11}
 N 1060 -160 1060 -150 {lab=#net11}
 N 1240 -260 1240 -150 {lab=#net11}
-N 880 -310 880 -40 {lab=#net18}
-N 1450 40 1450 210 {lab=#net19}
-N 880 20 880 240 {lab=#net17}
+N 1450 40 1450 210 {lab=#net17}
 N 780 -300 830 -300 {lab=#net10}
 N 780 -310 780 -300 {lab=#net10}
 N 830 -300 1210 -300 {lab=#net10}
+N 710 240 1210 240 {lab=#net7}
 C {devices/code_shown.sym} -80 90 0 0 {name=MODEL only_toplevel=true
 format="tcleval( @value )"
 value="
@@ -317,14 +300,6 @@ m=1
 model=sg13_lv_pmos
 spiceprefix=X
 }
-C {sg13g2_pr/sg13_lv_pmos.sym} 860 -340 0 0 {name=M24
-l=0.28u
-w=1u
-ng=1
-m=1
-model=sg13_lv_pmos
-spiceprefix=X
-}
 C {sg13g2_pr/sg13_lv_pmos.sym} 1430 -300 0 0 {name=M20
 l=0.28u
 w=1u
@@ -377,15 +352,6 @@ m=1
 model=sg13_lv_pmos
 spiceprefix=X
 }
-C {sg13g2_pr/sg13_lv_nmos.sym} 900 280 0 1 {name=M26
-l=1u
-w=1u
-ng=1
-m=1
-model=sg13_lv_nmos
-spiceprefix=X
-}
-C {gnd.sym} 880 350 0 0 {name=l7 lab=0}
 C {sg13g2_pr/sg13_lv_pmos.sym} 1310 -340 0 0 {name=M5
 l=0.28u
 w=1u
@@ -421,7 +387,6 @@ spiceprefix=X
 }
 C {gnd.sym} 1240 350 0 0 {name=l11 lab=0}
 C {ammeter.sym} 780 -10 0 0 {name=Vmeas savecurrent=true spice_ignore=0}
-C {ammeter.sym} 880 -10 0 0 {name=Vmeas1 savecurrent=true spice_ignore=0}
 C {ammeter.sym} 340 -260 0 0 {name=Vmeas3 savecurrent=true spice_ignore=0}
 C {ammeter.sym} 340 80 0 0 {name=Vmeas4 savecurrent=true spice_ignore=0}
 C {ammeter.sym} 1450 -180 0 0 {name=Vmeas6 savecurrent=true spice_ignore=0}

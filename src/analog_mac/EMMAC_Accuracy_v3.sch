@@ -50,6 +50,7 @@ C {devices/code_shown.sym} 690 -60 0 0 {name=MODEL only_toplevel=true
 format="tcleval( @value )"
 value=".lib cornerMOSlv.lib mos_tt
 .lib cornerMOShv.lib mos_tt
+.lib cornerRES.lib res_typ_stat
 "}
 C {code_shown.sym} 680 40 0 0 {name=spice1 only_toplevel=false value="
 .control

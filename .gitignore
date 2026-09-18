@@ -20,5 +20,3 @@ __pycache__/
 *.py[cod]
 .venv/
 .oracle_cache.json
-*.log
-*.csv
